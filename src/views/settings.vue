@@ -704,6 +704,7 @@
           :class="{ 'global-disabled': !enableGlobalShortcut }"
           tabindex="0"
           @keydown="handleShortcutKeydown"
+          @keyup="handleShortcutKeyup"
         >
           <div class="row row-head">
             <div class="col">功能</div>
@@ -737,7 +738,7 @@
             </div>
             <div class="col">
               <div
-                class="keyboard-input"
+                class="keyboard-input global-keyboard-input"
                 :class="{
                   active:
                     shortcutInput.id === shortcut.id &&
@@ -747,14 +748,21 @@
                 @click.stop="
                   readyToRecordShortcut(shortcut.id, 'globalShortcut')
                 "
-                >{{
+              >
+                {{
                   shortcutInput.id === shortcut.id &&
                   shortcutInput.type === 'globalShortcut' &&
                   recordedShortcutComputed !== ''
                     ? formatShortcut(recordedShortcutComputed)
                     : formatShortcut(shortcut.globalShortcut)
-                }}</div
-              >
+                }}<button
+                  class="shortcut-disable-btn"
+                  :disabled="!enableGlobalShortcut || !shortcut.globalShortcut"
+                  @click.stop="disableSingleShortcut(shortcut.id)"
+                >
+                  ×
+                </button>
+              </div>
             </div>
           </div>
           <button
@@ -793,13 +801,12 @@ import { auth as lastfmAuth } from '@/api/lastfm';
 import { changeAppearance, bytesToSize } from '@/utils/common';
 import { countDBSize, clearDB } from '@/utils/db';
 import pkg from '../../package.json';
+import { eventToKey, formatCombo, verifyCombo } from '@/utils/shortcuts';
 
 const electron =
   process.env.IS_ELECTRON === true ? window.require('electron') : null;
 const ipcRenderer =
   process.env.IS_ELECTRON === true ? electron.ipcRenderer : null;
-
-const validShortcutCodes = ['=', '-', '~', '[', ']', ';', "'", ',', '.', '/'];
 
 export default {
   name: 'Settings',
@@ -841,51 +848,20 @@ export default {
       return isLooseLoggedIn() && this.data.user.nickname;
     },
     recordedShortcutComputed() {
-      let shortcut = [];
-      this.recordedShortcut.map(e => {
-        if (e.keyCode >= 65 && e.keyCode <= 90) {
-          // A-Z
-          shortcut.push(e.code.replace('Key', ''));
-        } else if (e.key === 'Meta') {
-          // ⌘ Command on macOS
-          shortcut.push('Command');
-        } else if (['Alt', 'Control', 'Shift'].includes(e.key)) {
-          shortcut.push(e.key);
-        } else if (e.keyCode >= 48 && e.keyCode <= 57) {
-          // 0-9
-          shortcut.push(e.code.replace('Digit', ''));
-        } else if (e.keyCode >= 112 && e.keyCode <= 123) {
-          // F1-F12
-          shortcut.push(e.code);
-        } else if (
-          ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'].includes(e.key)
-        ) {
-          // Arrows
-          shortcut.push(e.code.replace('Arrow', ''));
-        } else if (validShortcutCodes.includes(e.key)) {
-          shortcut.push(e.key);
-        }
-      });
       const sortTable = {
         Control: 1,
         Shift: 2,
         Alt: 3,
-        Command: 4,
+        CommandOrControl: 4,
       };
-      shortcut = shortcut.sort((a, b) => {
-        if (!sortTable[a] || !sortTable[b]) return 0;
-        if (sortTable[a] - sortTable[b] <= -1) {
-          return -1;
-        } else if (sortTable[a] - sortTable[b] >= 1) {
-          return 1;
-        } else {
-          return 0;
-        }
-      });
-      shortcut = shortcut.join('+');
+      let shortcut = this.recordedShortcut;
+      console.log('before sort:', shortcut);
+      shortcut = shortcut
+        .sort((a, b) => (sortTable[a] || 99) - (sortTable[b] || 99))
+        .join('+');
+      console.log('after sort:', shortcut);
       return shortcut;
     },
-
     lang: {
       get() {
         return this.settings.lang;
@@ -1389,30 +1365,12 @@ export default {
       }
       this.showToast('已更新代理设置');
     },
+    // 快捷键相关方法
     clickOutside() {
       this.exitRecordShortcut();
     },
     formatShortcut(shortcut) {
-      shortcut = shortcut
-        .replaceAll('+', ' + ')
-        .replace('Up', '↑')
-        .replace('Down', '↓')
-        .replace('Right', '→')
-        .replace('Left', '←');
-      if (this.settings.lang === 'zh-CN') {
-        shortcut = shortcut.replace('Space', '空格');
-      } else if (this.settings.lang === 'zh-TW') {
-        shortcut = shortcut.replace('Space', '空白鍵');
-      }
-      if (process.platform === 'darwin') {
-        return shortcut
-          .replace('CommandOrControl', '⌘')
-          .replace('Command', '⌘')
-          .replace('Alt', '⌥')
-          .replace('Control', '⌃')
-          .replace('Shift', '⇧');
-      }
-      return shortcut.replace('CommandOrControl', 'Ctrl');
+      return formatCombo(shortcut);
     },
     readyToRecordShortcut(id, type) {
       if (type === 'globalShortcut' && this.enableGlobalShortcut === false) {
@@ -1423,25 +1381,27 @@ export default {
       ipcRenderer.send('switchGlobalShortcutStatusTemporary', 'disable');
     },
     handleShortcutKeydown(e) {
-      if (this.shortcutInput.recording === false) return;
+      if (!this.shortcutInput.recording) return;
       e.preventDefault();
-      if (this.recordedShortcut.find(s => s.keyCode === e.keyCode)) return;
-      this.recordedShortcut.push(e);
-      if (
-        (e.keyCode >= 65 && e.keyCode <= 90) || // A-Z
-        (e.keyCode >= 48 && e.keyCode <= 57) || // 0-9
-        (e.keyCode >= 112 && e.keyCode <= 123) || // F1-F12
-        ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'].includes(e.key) || // Arrows
-        validShortcutCodes.includes(e.key)
-      ) {
-        this.saveShortcut();
+      const key = eventToKey(e);
+      if (key === null) {
+        this.showToast('非法按键，请重新设置');
+        this.exitRecordShortcut();
+        return;
       }
+      if (this.recordedShortcut.find(k => k === key)) return;
+      this.recordedShortcut.push(key);
     },
     handleShortcutKeyup(e) {
-      if (this.recordedShortcut.find(s => s.keyCode === e.keyCode)) {
-        this.recordedShortcut = this.recordedShortcut.filter(
-          s => s.keyCode !== e.keyCode
-        );
+      if (!this.shortcutInput.recording) return;
+      e.preventDefault();
+      let warningMessage = verifyCombo(this.recordedShortcutComputed);
+      if (warningMessage !== '') {
+        this.showToast(warningMessage);
+        this.exitRecordShortcut();
+      } else {
+        this.saveShortcut();
+        this.exitRecordShortcut();
       }
     },
     saveShortcut() {
@@ -1455,6 +1415,26 @@ export default {
       ipcRenderer.send('updateShortcut', payload);
       this.showToast('快捷键已保存');
       this.recordedShortcut = [];
+    },
+    disableSingleShortcut(shortcutId) {
+      if (!this.enableGlobalShortcut) return;
+      this.clickOutside();
+      const target = this.settings.shortcuts.find(s => s.id === shortcutId);
+      if (!target) return;
+      const oldGlobalShortcut = target.globalShortcut;
+      target.globalShortcut = '';
+      this.showToast(`已禁用【${target.name}】全局快捷键`);
+
+      this.$store.commit('updateSettings', {
+        ...this.settings,
+        shortcuts: [...this.settings.shortcuts],
+      });
+
+      ipcRenderer.send(
+        'disableSingleGlobalShortcut',
+        shortcutId,
+        oldGlobalShortcut
+      );
     },
     exitRecordShortcut() {
       if (this.shortcutInput.recording === false) return;
@@ -1690,6 +1670,35 @@ input[type='number'] {
     &.active {
       color: var(--color-primary);
       background-color: var(--color-primary-bg);
+    }
+  }
+  .global-keyboard-input {
+    position: relative;
+    min-width: 160px;
+  }
+  .shortcut-disable-btn {
+    border-radius: 50%;
+    background-color: #eee;
+    padding: 0;
+    transition: all 0.2s;
+    position: absolute;
+    top: 50%;
+    right: 5%;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 18px;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    &:hover {
+      background-color: #ff4444;
+      color: white;
+    }
+    &:disabled {
+      opacity: 0.4;
+      color: #000;
+      background-color: #eee;
     }
   }
   .restore-default-shortcut {
